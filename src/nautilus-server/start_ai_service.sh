@@ -10,21 +10,21 @@ echo "Starting AI service for intent-classifier..."
 echo "========================================="
 
 # Change to the ai-main directory
-if [ ! -d "ai-main" ]; then
-    echo "ERROR: ai-main directory not found!"
-    echo "Current directory: $(pwd)"
-    echo "Contents of /:"
-    ls -la / | head -20
-    exit 1
-fi
+# if [ ! -d "~/nautilus/ai-main" ]; then
+#     echo "ERROR: /ai-main directory not found!"
+#     echo "Current directory: $(pwd)"
+#     echo "Contents of /:"
+#     ls -la ~/nautilus/ai-main | head -20
+#     exit 1
+# fi
 
-cd ai-main || {
+cd ~/nautilus/ai-main || {
     echo "ERROR: Failed to change to ai-main directory"
     exit 1
 }
 
 echo "Current directory: $(pwd)"
-echo "Contents of ai-main:"
+echo "Contents of /ai-main:"
 ls -la
 
 # Check if model files exist
@@ -52,27 +52,8 @@ export PATH=/root/.local/bin:$PATH
 
 echo "PYTHONPATH set to: $PYTHONPATH"
 
-# Try to install Python dependencies if pip is available
-# Note: TensorFlow and other large packages may not install in minimal enclave environment
-# Consider pre-bundling dependencies or using a lighter ML framework
-if command -v pip3 >/dev/null 2>&1; then
-    echo "Installing Python dependencies..."
-    echo "This may take several minutes, especially for TensorFlow..."
-    if pip3 install --user -r requirements.txt > /tmp/pip_install.log 2>&1; then
-        echo "✅ Python dependencies installed successfully"
-    else
-        echo "❌ WARNING: Failed to install some Python dependencies"
-        echo "Last 30 lines of pip install log:"
-        tail -30 /tmp/pip_install.log 2>/dev/null || echo "Log file not found"
-        echo "The AI service may not work correctly without all dependencies"
-        echo "Attempting to continue anyway..."
-    fi
-else
-    echo "WARNING: pip3 not found, skipping dependency installation"
-fi
-
-# Check if critical dependencies are available
-echo "Checking if critical Python modules are available..."
+# Dependencies should be pre-bundled from build - verify they're available
+echo "Verifying pre-bundled Python dependencies..."
 python3 -c "import fastapi" 2>/dev/null && echo "✅ fastapi available" || echo "❌ fastapi NOT available"
 python3 -c "import uvicorn" 2>/dev/null && echo "✅ uvicorn available" || echo "❌ uvicorn NOT available"
 python3 -c "import tensorflow" 2>/dev/null && echo "✅ tensorflow available" || echo "❌ tensorflow NOT available"
@@ -82,10 +63,8 @@ if ! python3 -c "import fastapi, uvicorn" 2>/dev/null; then
     echo "❌ ERROR: Required modules (fastapi, uvicorn) are not available!"
     echo "Cannot start AI service without these dependencies."
     echo ""
-    echo "Possible solutions:"
-    echo "1. Pre-install dependencies in the enclave image"
-    echo "2. Use a Python environment with dependencies pre-bundled"
-    echo "3. Check /tmp/pip_install.log for installation errors"
+    echo "Dependencies should have been pre-bundled during the enclave build."
+    echo "Please rebuild the enclave image with: make ENCLAVE_APP=intent-classifier"
     exit 1
 fi
 
@@ -133,4 +112,3 @@ else
     tail -50 /tmp/ai_service.log 2>/dev/null || echo "Log file not found"
     exit 1
 fi
-

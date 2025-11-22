@@ -25,6 +25,21 @@ FROM stagex/user-cpio@sha256:2695e1b42f93ec3ea0545e270f0fda4adca3cb48d0526da0195
 FROM stagex/user-socat:local@sha256:acef3dacc5b805d0eaaae0c2d13f567bf168620aea98c8d3e60ea5fd4e8c3108 AS user-socat
 FROM stagex/user-jq@sha256:ced6213c21b570dde1077ef49966b64cbf83890859eff83f33c82620520b563e AS user-jq
 
+# Build the AI service with all its dependencies
+FROM python:3.13-slim as ai-service-builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+COPY ai-main/requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.13-slim as ai-service
+WORKDIR /app
+COPY --from=ai-service-builder /root/.local /root/.local
+COPY ai-main/app.py .
+COPY ai-main/intent_classifier_model.keras .
+COPY ai-main/model_artifacts.pkl .
+ENV PATH=/root/.local/bin:$PATH
+
 FROM scratch as base
 ENV TARGET=x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static"
@@ -78,71 +93,23 @@ RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
 RUN cp /src/nautilus-server/start_ai_service.sh initramfs/ && chmod +x initramfs/start_ai_service.sh
 
-# Copy AI model files and Python app for intent-classifier (if they exist)
+# Copy AI service from pre-built image with all dependencies
 RUN mkdir -p initramfs/ai-main && \
-    (cp -r /ai-main/* initramfs/ai-main/ 2>/dev/null || true) && \
-    (cp /src/nautilus-server/src/apps/intent-classifier/allowed_endpoints.yaml initramfs/allowed_endpoints.yaml 2>/dev/null || true)
+    mkdir -p initramfs/root/.local && \
+    mkdir -p initramfs/usr/local/bin
 
-# Pre-install Python dependencies for intent-classifier (if ai-main exists)
-# This installs packages to a target directory that will be copied into the enclave
-RUN if [ -d "/ai-main" ] && [ -f "/ai-main/requirements.txt" ]; then \
-        echo "========================================="; \
-        echo "Pre-bundling Python dependencies for intent-classifier..."; \
-        echo "========================================="; \
-        if command -v pip3 >/dev/null 2>&1; then \
-            # Create a target directory for Python packages \
-            mkdir -p /python-packages/lib/python3.11/site-packages; \
-            mkdir -p /python-packages/bin; \
-            \
-            # Install packages to the target directory \
-            echo "Installing packages to /python-packages..."; \
-            PYTHONUSERBASE=/python-packages pip3 install --no-cache-dir --target /python-packages/lib/python3.11/site-packages -r /ai-main/requirements.txt 2>&1 | tee /tmp/pip_build.log || \
-            (echo "WARNING: Some Python dependencies failed to install during build" && \
-             tail -50 /tmp/pip_build.log && \
-             echo "They will be attempted again at runtime"); \
-            \
-            # Also install to user directory as fallback \
-            pip3 install --user --no-cache-dir -r /ai-main/requirements.txt 2>&1 | tail -20 || true; \
-            \
-            echo "Verifying installed packages..."; \
-            ls -la /python-packages/lib/python3.11/site-packages/ | head -20; \
-            \
-            # Copy packages to initramfs in multiple locations for compatibility \
-            echo "Copying packages to initramfs..."; \
-            mkdir -p initramfs/usr/local/lib/python3.11/site-packages; \
-            mkdir -p initramfs/root/.local/lib/python3.11/site-packages; \
-            mkdir -p initramfs/python-packages/lib/python3.11/site-packages; \
-            \
-            # Copy from target directory \
-            if [ -d "/python-packages/lib/python3.11/site-packages" ]; then \
-                cp -r /python-packages/lib/python3.11/site-packages/* initramfs/usr/local/lib/python3.11/site-packages/ 2>/dev/null || true; \
-                cp -r /python-packages/lib/python3.11/site-packages/* initramfs/root/.local/lib/python3.11/site-packages/ 2>/dev/null || true; \
-                cp -r /python-packages/lib/python3.11/site-packages/* initramfs/python-packages/lib/python3.11/site-packages/ 2>/dev/null || true; \
-            fi; \
-            \
-            # Copy from user directory as well \
-            if [ -d "/root/.local/lib/python3.11/site-packages" ]; then \
-                cp -r /root/.local/lib/python3.11/site-packages/* initramfs/usr/local/lib/python3.11/site-packages/ 2>/dev/null || true; \
-                cp -r /root/.local/lib/python3.11/site-packages/* initramfs/root/.local/lib/python3.11/site-packages/ 2>/dev/null || true; \
-            fi; \
-            \
-            # Copy binaries if they exist \
-            if [ -d "/python-packages/bin" ]; then \
-                mkdir -p initramfs/usr/local/bin; \
-                mkdir -p initramfs/root/.local/bin; \
-                cp -r /python-packages/bin/* initramfs/usr/local/bin/ 2>/dev/null || true; \
-                cp -r /python-packages/bin/* initramfs/root/.local/bin/ 2>/dev/null || true; \
-            fi; \
-            \
-            echo "✅ Python packages pre-bundled successfully"; \
-            echo "Packages installed in:"; \
-            echo "  - /usr/local/lib/python3.11/site-packages"; \
-            echo "  - /root/.local/lib/python3.11/site-packages"; \
-            echo "  - /python-packages/lib/python3.11/site-packages"; \
-        else \
-            echo "WARNING: pip3 not available during build"; \
-        fi; \
-    fi
+# Copy AI application files from the ai-service stage
+COPY --from=ai-service /app/app.py initramfs/ai-main/
+COPY --from=ai-service /app/intent_classifier_model.keras initramfs/ai-main/
+COPY --from=ai-service /app/model_artifacts.pkl initramfs/ai-main/
+
+# Copy Python dependencies from the ai-service stage
+COPY --from=ai-service /root/.local initramfs/root/.local
+
+# Copy allowed_endpoints if it exists
+RUN (cp /src/nautilus-server/src/apps/intent-classifier/allowed_endpoints.yaml initramfs/allowed_endpoints.yaml 2>/dev/null || true)
+
+RUN echo "✅ AI service and dependencies copied from pre-built image"
 
 RUN <<-EOF
     set -eux
