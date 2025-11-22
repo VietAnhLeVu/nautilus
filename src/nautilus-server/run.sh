@@ -12,7 +12,19 @@
 
 set -e # Exit immediately if a command exits with a non-zero status
 echo "run.sh script is running"
-export PYTHONPATH=/lib/python3.11:/usr/local/lib/python3.11/lib-dynload:/usr/local/lib/python3.11/site-packages:/lib
+
+# Set up Python paths to include pre-bundled packages
+# Packages are installed in multiple locations for compatibility
+export PYTHONPATH=/lib/python3.11:\
+/usr/local/lib/python3.11/lib-dynload:\
+/usr/local/lib/python3.11/site-packages:\
+/root/.local/lib/python3.11/site-packages:\
+/python-packages/lib/python3.11/site-packages:\
+/lib
+
+# Add Python package binaries to PATH
+export PATH=/usr/local/bin:/root/.local/bin:$PATH
+
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
 
 echo "Script completed."

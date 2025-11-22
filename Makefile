@@ -25,20 +25,26 @@ endif
 		--build-arg ENCLAVE_APP=$(ENCLAVE_APP) \
 		.
 
+# Enclave resource specifications
+# Adjust these values based on your application needs
+# For intent-classifier with TensorFlow, use at least 2048M memory
+ENCLAVE_CPU_COUNT ?= 2
+ENCLAVE_MEMORY ?= 2048M
+
 .PHONY: run
 run: out/nitro.eif
 	sudo nitro-cli \
 		run-enclave \
-		--cpu-count 2 \
-		--memory 512M \
+		--cpu-count $(ENCLAVE_CPU_COUNT) \
+		--memory $(ENCLAVE_MEMORY) \
 		--eif-path out/nitro.eif
 
 .PHONY: run-debug
 run-debug: out/nitro.eif
 	sudo nitro-cli \
 		run-enclave \
-		--cpu-count 2 \
-		--memory 512M \
+		--cpu-count $(ENCLAVE_CPU_COUNT) \
+		--memory $(ENCLAVE_MEMORY) \
 		--eif-path out/nitro.eif \
 		--debug-mode \
 		--attach-console

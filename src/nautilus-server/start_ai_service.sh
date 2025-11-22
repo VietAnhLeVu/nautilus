@@ -46,18 +46,47 @@ fi
 
 echo "All required files found. Starting Python service..."
 
+# Set up Python path to include user site-packages
+export PYTHONPATH=/lib/python3.11:/usr/local/lib/python3.11/lib-dynload:/usr/local/lib/python3.11/site-packages:/root/.local/lib/python3.11/site-packages:$PYTHONPATH
+export PATH=/root/.local/bin:$PATH
+
+echo "PYTHONPATH set to: $PYTHONPATH"
+
 # Try to install Python dependencies if pip is available
 # Note: TensorFlow and other large packages may not install in minimal enclave environment
 # Consider pre-bundling dependencies or using a lighter ML framework
 if command -v pip3 >/dev/null 2>&1; then
     echo "Installing Python dependencies..."
-    pip3 install --user -r requirements.txt > /tmp/pip_install.log 2>&1 || {
-        echo "WARNING: Failed to install some Python dependencies"
-        echo "Check /tmp/pip_install.log for details"
+    echo "This may take several minutes, especially for TensorFlow..."
+    if pip3 install --user -r requirements.txt > /tmp/pip_install.log 2>&1; then
+        echo "✅ Python dependencies installed successfully"
+    else
+        echo "❌ WARNING: Failed to install some Python dependencies"
+        echo "Last 30 lines of pip install log:"
+        tail -30 /tmp/pip_install.log 2>/dev/null || echo "Log file not found"
         echo "The AI service may not work correctly without all dependencies"
-    }
+        echo "Attempting to continue anyway..."
+    fi
 else
     echo "WARNING: pip3 not found, skipping dependency installation"
+fi
+
+# Check if critical dependencies are available
+echo "Checking if critical Python modules are available..."
+python3 -c "import fastapi" 2>/dev/null && echo "✅ fastapi available" || echo "❌ fastapi NOT available"
+python3 -c "import uvicorn" 2>/dev/null && echo "✅ uvicorn available" || echo "❌ uvicorn NOT available"
+python3 -c "import tensorflow" 2>/dev/null && echo "✅ tensorflow available" || echo "❌ tensorflow NOT available"
+
+# Check if we have at least fastapi and uvicorn (minimum required)
+if ! python3 -c "import fastapi, uvicorn" 2>/dev/null; then
+    echo "❌ ERROR: Required modules (fastapi, uvicorn) are not available!"
+    echo "Cannot start AI service without these dependencies."
+    echo ""
+    echo "Possible solutions:"
+    echo "1. Pre-install dependencies in the enclave image"
+    echo "2. Use a Python environment with dependencies pre-bundled"
+    echo "3. Check /tmp/pip_install.log for installation errors"
+    exit 1
 fi
 
 # Start the Python AI service in the background
