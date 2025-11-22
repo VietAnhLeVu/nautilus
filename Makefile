@@ -29,7 +29,7 @@ endif
 # Adjust these values based on your application needs
 # For intent-classifier with TensorFlow, use at least 2048M memory
 ENCLAVE_CPU_COUNT ?= 2
-ENCLAVE_MEMORY ?= 2048M
+ENCLAVE_MEMORY ?= 4096M
 
 .PHONY: run
 run: out/nitro.eif
