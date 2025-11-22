@@ -10,16 +10,16 @@ echo "Starting AI service for intent-classifier..."
 echo "========================================="
 
 # Change to the ai-main directory
-if [ ! -d "/ai-main" ]; then
-    echo "ERROR: /ai-main directory not found!"
+if [ ! -d "ai-main" ]; then
+    echo "ERROR: ai-main directory not found!"
     echo "Current directory: $(pwd)"
     echo "Contents of /:"
     ls -la / | head -20
     exit 1
 fi
 
-cd /ai-main || {
-    echo "ERROR: Failed to change to /ai-main directory"
+cd ai-main || {
+    echo "ERROR: Failed to change to ai-main directory"
     exit 1
 }
 
