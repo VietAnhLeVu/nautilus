@@ -52,10 +52,21 @@ socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 # Start AI service if this is intent-classifier app
 # Check if ai-main directory exists and start the Python service
 if [ -d "/ai-main" ] && [ -f "/ai-main/app.py" ]; then
+    echo "========================================="
     echo "Detected AI service files, starting Python AI service..."
-    /start_ai_service.sh &
-    # Wait a bit for the AI service to start before starting the Rust server
-    sleep 3
+    echo "========================================="
+    /start_ai_service.sh
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to start AI service. Check logs above."
+        echo "Continuing anyway, but /process_data endpoint will fail..."
+    else
+        echo "AI service started successfully"
+    fi
+    # Give it a moment to fully initialize
+    sleep 2
+else
+    echo "Warning: /ai-main directory or app.py not found"
+    echo "AI service will not be available"
 fi
 
 /nautilus-server
