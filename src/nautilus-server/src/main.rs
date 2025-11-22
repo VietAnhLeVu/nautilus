@@ -18,7 +18,12 @@ async fn main() -> Result<()> {
     // This API_KEY value can be stored with secret-manager. To do that, follow the prompt `sh configure_enclave.sh`
     // Answer `y` to `Do you want to use a secret?` and finish. Otherwise, uncomment this code to use a hardcoded value.
     // let api_key = "045a27812dbe456392913223221306".to_string();
-    #[cfg(not(feature = "seal-example"))]
+    
+    // intent-classifier doesn't need an API key since it runs locally
+    #[cfg(feature = "intent-classifier")]
+    let api_key = String::new();
+    
+    #[cfg(not(any(feature = "seal-example", feature = "intent-classifier")))]
     let api_key = std::env::var("API_KEY").expect("API_KEY must be set");
 
     // NOTE: if built with `seal-example` flag the `process_data` does not use this api_key from AppState, instead
@@ -39,6 +44,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(ping))
+        .route("/test", get(test_endpoint))
         .route("/get_attestation", get(get_attestation))
         .route("/process_data", post(process_data))
         .route("/health_check", get(health_check))
@@ -53,5 +59,9 @@ async fn main() -> Result<()> {
 }
 
 async fn ping() -> &'static str {
-    "Pong!"
+    "Pongg!"
+}
+
+async fn test_endpoint() -> &'static str {
+    "Intent Classifier Server is running! ✅"
 }

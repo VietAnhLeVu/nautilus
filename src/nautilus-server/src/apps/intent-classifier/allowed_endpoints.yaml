@@ -1,0 +1,5 @@
+# External endpoints that the enclave is allowed to access.
+# For the intent-classifier, we don't need external endpoints since
+# the AI model runs locally inside the enclave.
+endpoints: []
+

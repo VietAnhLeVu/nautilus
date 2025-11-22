@@ -47,4 +47,13 @@ echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpair
 # Listens on Local VSOCK Port 3000 and forwards to localhost 3000
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 
+# Start AI service if this is intent-classifier app
+# Check if ai-main directory exists and start the Python service
+if [ -d "/ai-main" ] && [ -f "/ai-main/app.py" ]; then
+    echo "Detected AI service files, starting Python AI service..."
+    /start_ai_service.sh &
+    # Wait a bit for the AI service to start before starting the Rust server
+    sleep 3
+fi
+
 /nautilus-server

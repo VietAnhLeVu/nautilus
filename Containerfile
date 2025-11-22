@@ -76,6 +76,12 @@ RUN cp /target/${TARGET}/release/init initramfs
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
+RUN cp /src/nautilus-server/start_ai_service.sh initramfs/ && chmod +x initramfs/start_ai_service.sh
+
+# Copy AI model files and Python app for intent-classifier (if they exist)
+RUN mkdir -p initramfs/ai-main && \
+    (cp -r /ai-main/* initramfs/ai-main/ 2>/dev/null || true) && \
+    (cp /src/nautilus-server/src/apps/intent-classifier/allowed_endpoints.yaml initramfs/allowed_endpoints.yaml 2>/dev/null || true)
 
 RUN <<-EOF
     set -eux

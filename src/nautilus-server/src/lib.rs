@@ -21,6 +21,10 @@ mod apps {
     #[cfg(feature = "seal-example")]
     #[path = "seal-example/mod.rs"]
     pub mod seal_example;
+
+    #[cfg(feature = "intent-classifier")]
+    #[path = "intent-classifier/mod.rs"]
+    pub mod intent_classifier;
 }
 
 pub mod app {
@@ -32,6 +36,9 @@ pub mod app {
 
     #[cfg(feature = "seal-example")]
     pub use crate::apps::seal_example::*;
+
+    #[cfg(feature = "intent-classifier")]
+    pub use crate::apps::intent_classifier::*;
 }
 
 pub mod common;
