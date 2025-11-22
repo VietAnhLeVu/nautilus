@@ -239,7 +239,6 @@ pub async fn process_data(
     println!("[process_data] ✅ ENDPOINT CALLED - Received intent classification request");
     println!("[process_data] Request payload: solver_window_ms={}, max_gas_cost_usd={}, input_count={}", 
              request.payload.solver_window_ms, request.payload.max_gas_cost_usd, request.payload.input_count);
-          request.payload.solver_window_ms, request.payload.max_gas_cost_usd, request.payload.input_count);
     
     println!("[process_data] Step 1: Creating HTTP client...");
     // Call the Python AI service running on localhost:8000
@@ -302,7 +301,6 @@ pub async fn process_data(
     println!("[process_data] Step 5: ✅ Successfully parsed Python response JSON");
     println!("[process_data] Step 5: Python response - primary_category={}, confidence={}", 
              python_response.primary_category, python_response.primary_category_confidence);
-          python_response.primary_category, python_response.primary_category_confidence);
     
     println!("[process_data] Step 6: Converting f64 -> u64 (scaling by 1e6)...");
     // Convert f64 -> u64 (scaled by 1e6)
