@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Data files
+*.csv
+training_data.csv
+surplus_first_333_samples.csv
+gas_optimized_333_samples.csv
+reputation_trust_333_samples.csv
+
+# Scripts
+generate_training_data.py
+merge_datasets.py
+train_model.py
+test_inference.py
+
+# Documentation
+*.md
+README.md
+GENERATE_DATA.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Environment
+.env
