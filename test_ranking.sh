@@ -28,7 +28,7 @@ PAYLOAD='{
       "complexity_level_confidence": 0.92,
       "risk_level": "low",
       "risk_level_confidence": 0.88,
-      "strategy": "direct_swap",
+      "strategy": "Speed-Priority",
       "strategy_confidence": 0.93,
       "weights": {
         "gt_weight_surplus_usd": 0.3,
