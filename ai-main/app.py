@@ -83,7 +83,7 @@ class PredictionResponse(BaseModel):
     risk_level_confidence: float
     strategy: str
     strategy_confidence: float
-    weights: dict
+    weights: dict  # 9 weights: surplus_usd, surplus_percentage, gas_cost, protocol_fees, total_hops, protocols_count, execution_time, solver_reputation, solver_success_rate
 
 @app.on_event("startup")
 async def load_model_and_artifacts():
@@ -92,11 +92,11 @@ async def load_model_and_artifacts():
     
     try:
         # Load the trained model
-        model = tf.keras.models.load_model('intent_classifier_model.keras')
+        model = tf.keras.models.load_model('model/intent_classifier_model.keras')
         print("✓ Model loaded successfully")
         
         # Load preprocessing artifacts
-        with open('model_artifacts.pkl', 'rb') as f:
+        with open('model/model_artifacts.pkl', 'rb') as f:
             artifacts = pickle.load(f)
             label_encoders = artifacts['label_encoders']
             gt_encoders = artifacts['gt_encoders']
@@ -221,11 +221,17 @@ async def predict(intent: Intent):
         strategy_conf = float(np.max(strategy_pred))
         
         # Weights are already normalized by softmax in model (sum to 1.0)
-        # These are the 3 weights for the predicted strategy
+        # 9 shared weights across all strategies
         weights_dict = {
-            "weight_1": float(weights_pred[0]),
-            "weight_2": float(weights_pred[1]),
-            "weight_3": float(weights_pred[2])
+            "gt_weight_surplus_usd": float(weights_pred[0]),
+            "gt_weight_surplus_percentage": float(weights_pred[1]),
+            "gt_weight_gas_cost": float(weights_pred[2]),
+            "gt_weight_protocol_fees": float(weights_pred[3]),
+            "gt_weight_total_hops": float(weights_pred[4]),
+            "gt_weight_protocols_count": float(weights_pred[5]),
+            "gt_weight_estimated_execution_time": float(weights_pred[6]),
+            "gt_weight_solver_reputation_score": float(weights_pred[7]),
+            "gt_weight_solver_success_rate": float(weights_pred[8])
         }
         
         return PredictionResponse(

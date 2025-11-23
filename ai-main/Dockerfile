@@ -24,8 +24,7 @@ COPY --from=builder /root/.local /root/.local
 
 # Copy application code and model files
 COPY app.py .
-COPY intent_classifier_model.keras .
-COPY model_artifacts.pkl .
+COPY model/ ./model/
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH

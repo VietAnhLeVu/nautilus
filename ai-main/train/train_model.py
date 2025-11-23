@@ -1,6 +1,20 @@
+"""
+Intent Classifier Model Training Module
+
+This module provides a comprehensive training pipeline for the intent classification model.
+It includes data loading, preprocessing, model building, training, and evaluation.
+"""
+
+import logging
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple, Any, Optional
+import json
+import requests
+from io import StringIO
+
 import pandas as pd
 import numpy as np
-import json
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 import tensorflow as tf
@@ -8,267 +22,551 @@ from tensorflow import keras
 from tensorflow.keras import layers, Model
 import pickle
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
-
-print("🚀 Loading training data...")
-df = pd.read_csv('/home/nguyen-viet-an/intenus/ai_model/training_data.csv')
-print(f"✅ Loaded {len(df)} samples")
-
-print("\n📊 Processing features...")
-
-# Parse JSON arrays
-def parse_asset_types(x):
-    try:
-        parsed = json.loads(x)
-        return len(parsed)
-    except:
-        return 0
-
-df['input_asset_count'] = df['input_asset_types'].apply(parse_asset_types)
-df['output_asset_count'] = df['output_asset_types'].apply(parse_asset_types)
-
-label_encoders = {}
-categorical_features = ['time_in_force', 'optimization_goal', 'benchmark_source', 'client_platform']
-
-for col in categorical_features:
-    le = LabelEncoder()
-    df[col + '_encoded'] = le.fit_transform(df[col].astype(str))
-    label_encoders[col] = le
-
-intent_features = [
-    'solver_window_ms', 'user_decision_timeout_ms', 'time_to_deadline_ms',
-    'max_slippage_bps', 'max_gas_cost_usd', 'max_hops',
-    'surplus_weight', 'gas_cost_weight', 'execution_speed_weight', 'reputation_weight',
-    'input_count', 'output_count', 'input_value_usd', 'expected_output_value_usd',
-    'benchmark_confidence', 'expected_gas_usd', 'expected_slippage_bps',
-    'nlp_confidence', 'tag_count', 'input_asset_count', 'output_asset_count'
-]
-
-intent_features.extend([col + '_encoded' for col in categorical_features])
-
-boolean_features = ['has_whitelist', 'has_blacklist', 'has_limit_price', 
-                   'require_simulation', 'has_nlp_input']
-for col in boolean_features:
-    df[col + '_int'] = df[col].astype(int)
-    intent_features.append(col + '_int')
-
-print(f"✅ Total intent features: {len(intent_features)}")
-
-gt_encoders = {}
-gt_labels = ['primary_category', 'detected_priority', 'complexity_level', 'risk_level']
-
-for label in gt_labels:
-    le = LabelEncoder()
-    df[label + '_encoded'] = le.fit_transform(df[label])
-    gt_encoders[label] = le
-    print(f"   {label}: {len(le.classes_)} classes - {list(le.classes_)}")
-
-# Encode Strategy
-strategy_encoder = LabelEncoder()
-df['strategy_encoded'] = strategy_encoder.fit_transform(df['strategy'])
-print(f"   strategy: {len(strategy_encoder.classes_)} classes - {list(strategy_encoder.classes_)}")
-
-# ============================
-# 3. PREPARE WEIGHTS (REGRESSION TARGETS)
-# ============================
-print("\n⚖️  Processing weights...")
-
-# For each sample, collect the non-empty weights based on strategy
-def get_weights_for_strategy(row):
-    strategy = row['strategy']
-    if strategy == 'Surplus-First':
-        return [row['surplus_usd_weight'], row['surplus_pct_weight'], row['price_impact_weight']]
-    elif strategy == 'Gas-Optimized':
-        return [row['gas_cost_weight'], row['gas_efficiency_weight'], row['total_cost_weight']]
-    elif strategy == 'Reputation-Trust':
-        return [row['success_rate_weight'], row['reliability_weight'], row['guarantee_weight']]
-    return [0, 0, 0]
-
-# Create weight columns
-weight_cols = ['weight_1', 'weight_2', 'weight_3']
-df[weight_cols] = df.apply(get_weights_for_strategy, axis=1, result_type='expand')
-
-# Fill NaN values in weight columns
-for col in ['surplus_usd_weight', 'surplus_pct_weight', 'price_impact_weight',
-            'gas_cost_weight', 'gas_efficiency_weight', 'total_cost_weight',
-            'success_rate_weight', 'reliability_weight', 'guarantee_weight']:
-    df[col] = df[col].fillna(0)
-
-print("✅ Weights processed")
-
-X = df[intent_features].values
-y_primary_category = df['primary_category_encoded'].values
-y_detected_priority = df['detected_priority_encoded'].values
-y_complexity_level = df['complexity_level_encoded'].values
-y_risk_level = df['risk_level_encoded'].values
-y_strategy = df['strategy_encoded'].values
-y_weights = df[weight_cols].values
-
-# Normalize features
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# Reshape for CNN1D (samples, timesteps, features)
-# We'll treat each feature as a time step
-X_cnn = X_scaled.reshape(X_scaled.shape[0], X_scaled.shape[1], 1)
-
-# Split data
-X_train, X_test, \
-y_train_pc, y_test_pc, \
-y_train_dp, y_test_dp, \
-y_train_cl, y_test_cl, \
-y_train_rl, y_test_rl, \
-y_train_st, y_test_st, \
-y_train_w, y_test_w = train_test_split(
-    X_cnn, y_primary_category, y_detected_priority, y_complexity_level,
-    y_risk_level, y_strategy, y_weights,
-    test_size=0.2, random_state=42, stratify=y_strategy
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('training.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
-print(f"✅ Train samples: {len(X_train)}, Test samples: {len(X_test)}")
+logger = logging.getLogger(__name__)
 
-# ============================
-# 5. BUILD CNN1D MULTI-TASK MODEL
-# ============================
-print("\n🏗️  Building CNN1D Multi-Task Model...")
 
-input_shape = (X_cnn.shape[1], 1)
-inputs = layers.Input(shape=input_shape)
-
-# CNN1D Feature Extraction
-x = layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(inputs)
-x = layers.BatchNormalization()(x)
-x = layers.MaxPooling1D(pool_size=2)(x)
-x = layers.Dropout(0.3)(x)
-
-x = layers.Conv1D(256, kernel_size=3, padding='same', activation='relu')(x)
-x = layers.BatchNormalization()(x)
-x = layers.MaxPooling1D(pool_size=2)(x)
-x = layers.Dropout(0.3)(x)
-
-x = layers.Conv1D(512, kernel_size=3, padding='same', activation='relu')(x)
-x = layers.BatchNormalization()(x)
-x = layers.GlobalAveragePooling1D()(x)
-x = layers.Dropout(0.4)(x)
-
-# Shared dense layer
-shared = layers.Dense(256, activation='relu')(x)
-shared = layers.BatchNormalization()(shared)
-shared = layers.Dropout(0.3)(shared)
-
-# ===== Classification Heads =====
-
-# Primary Category Head
-pc_hidden = layers.Dense(128, activation='relu', name='pc_hidden')(shared)
-pc_output = layers.Dense(len(gt_encoders['primary_category'].classes_), 
-                         activation='softmax', name='primary_category')(pc_hidden)
-
-# Detected Priority Head
-dp_hidden = layers.Dense(128, activation='relu', name='dp_hidden')(shared)
-dp_output = layers.Dense(len(gt_encoders['detected_priority'].classes_), 
-                         activation='softmax', name='detected_priority')(dp_hidden)
-
-# Complexity Level Head
-cl_hidden = layers.Dense(128, activation='relu', name='cl_hidden')(shared)
-cl_output = layers.Dense(len(gt_encoders['complexity_level'].classes_), 
-                         activation='softmax', name='complexity_level')(cl_hidden)
-
-# Risk Level Head
-rl_hidden = layers.Dense(128, activation='relu', name='rl_hidden')(shared)
-rl_output = layers.Dense(len(gt_encoders['risk_level'].classes_), 
-                         activation='softmax', name='risk_level')(rl_hidden)
-
-# Strategy Head
-st_hidden = layers.Dense(128, activation='relu', name='st_hidden')(shared)
-st_output = layers.Dense(len(strategy_encoder.classes_), 
-                         activation='softmax', name='strategy')(st_hidden)
-
-# ===== Regression Heads for Weights =====
-
-# Weights Head (3 weights that sum to 1)
-weights_hidden = layers.Dense(128, activation='relu', name='weights_hidden')(shared)
-weights_hidden = layers.Dropout(0.2)(weights_hidden)
-weights_output = layers.Dense(3, activation='softmax', name='weights')(weights_hidden)  # softmax ensures sum=1
-
-# Build model
-model = Model(
-    inputs=inputs,
-    outputs=[pc_output, dp_output, cl_output, rl_output, st_output, weights_output]
-)
-
-# Compile with different losses and weights
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=0.001),
-    loss={
-        'primary_category': 'sparse_categorical_crossentropy',
-        'detected_priority': 'sparse_categorical_crossentropy',
-        'complexity_level': 'sparse_categorical_crossentropy',
-        'risk_level': 'sparse_categorical_crossentropy',
-        'strategy': 'sparse_categorical_crossentropy',
-        'weights': 'mse'
-    },
-    loss_weights={
-        'primary_category': 1.0,
-        'detected_priority': 1.0,
-        'complexity_level': 1.0,
-        'risk_level': 1.0,
-        'strategy': 1.5,  # Strategy is important
-        'weights': 2.0    # Weights are critical
-    },
-    metrics={
-        'primary_category': 'accuracy',
-        'detected_priority': 'accuracy',
-        'complexity_level': 'accuracy',
-        'risk_level': 'accuracy',
-        'strategy': 'accuracy',
-        'weights': 'mae'
-    }
-)
-
-print("✅ Model built successfully!")
-print(f"\n📋 Model Summary:")
-model.summary()
-
-print("\n🎓 Training model...")
-
-# Callbacks
-callbacks = [
-    keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        patience=15,
-        restore_best_weights=True,
-        verbose=1
-    ),
-    keras.callbacks.ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-6,
-        verbose=1
-    ),
-    keras.callbacks.ModelCheckpoint(
-        '/home/nguyen-viet-an/intenus/ai_model/best_model.keras',
-        monitor='val_loss',
-        save_best_only=True,
-        verbose=1
-    )
-]
-
-history = model.fit(
-    X_train,
-    {
-        'primary_category': y_train_pc,
-        'detected_priority': y_train_dp,
-        'complexity_level': y_train_cl,
-        'risk_level': y_train_rl,
-        'strategy': y_train_st,
-        'weights': y_train_w
-    },
-    validation_data=(
-        X_test,
-        {
+class IntentClassifierTrainer:
+    """
+    A trainer class for the intent classification model.
+    
+    This class handles the complete training pipeline including:
+    - Data loading and preprocessing
+    - Feature engineering
+    - Model architecture definition
+    - Training with callbacks
+    - Model evaluation and saving
+    """
+    
+    def __init__(
+        self,
+        data_source: str,
+        model_save_path: str = 'model/intent_classifier_model.keras',
+        artifacts_save_path: str = 'model/model_artifacts.pkl',
+        random_seed: int = 42
+    ):
+        """
+        Initialize the trainer.
+        
+        Args:
+            data_source: URL or local path to the training data CSV file
+            model_save_path: Path to save the trained model
+            artifacts_save_path: Path to save preprocessing artifacts
+            random_seed: Random seed for reproducibility
+        """
+        self.data_source = data_source
+        self.model_save_path = Path(model_save_path)
+        self.artifacts_save_path = Path(artifacts_save_path)
+        self.random_seed = random_seed
+        
+        # Ensure output directories exist
+        self.model_save_path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifacts_save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Set random seeds
+        np.random.seed(self.random_seed)
+        tf.random.set_seed(self.random_seed)
+        
+        # Initialize attributes
+        self.df: pd.DataFrame = None
+        self.model: keras.Model = None
+        self.label_encoders: Dict[str, LabelEncoder] = {}
+        self.gt_encoders: Dict[str, LabelEncoder] = {}
+        self.strategy_encoder: LabelEncoder = None
+        self.scaler: StandardScaler = None
+        self.history: keras.callbacks.History = None
+        
+        # Feature columns
+        self.intent_features: List[str] = None
+        self.weight_columns: List[str] = [
+            'gt_weight_surplus_usd',
+            'gt_weight_surplus_percentage',
+            'gt_weight_gas_cost',
+            'gt_weight_protocol_fees',
+            'gt_weight_total_hops',
+            'gt_weight_protocols_count',
+            'gt_weight_estimated_execution_time',
+            'gt_weight_solver_reputation_score',
+            'gt_weight_solver_success_rate'
+        ]
+        
+        logger.info("IntentClassifierTrainer initialized")
+        logger.info(f"Data source: {self.data_source}")
+        logger.info(f"Model save path: {self.model_save_path}")
+        logger.info(f"Artifacts save path: {self.artifacts_save_path}")
+    
+    def load_data(self) -> None:
+        """
+        Load training data from URL or local file.
+        
+        Supports:
+        - HTTP/HTTPS URLs (fetches CSV data)
+        - Local file paths
+        """
+        logger.info("Loading training data...")
+        
+        # Check if data source is URL or local path
+        if self.data_source.startswith(('http://', 'https://')):
+            logger.info(f"Fetching data from URL: {self.data_source}")
+            try:
+                response = requests.get(self.data_source, timeout=30)
+                response.raise_for_status()
+                
+                # Parse CSV from response
+                csv_data = StringIO(response.text)
+                self.df = pd.read_csv(csv_data)
+                logger.info("Data fetched successfully from URL")
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to fetch data from URL: {e}")
+                raise RuntimeError(f"Failed to fetch data from URL: {e}")
+        else:
+            # Local file path
+            data_path = Path(self.data_source)
+            if not data_path.exists():
+                raise FileNotFoundError(f"Data file not found: {data_path}")
+            
+            self.df = pd.read_csv(data_path)
+            logger.info("Data loaded from local file")
+        
+        logger.info(f"Loaded {len(self.df)} samples")
+        logger.info(f"Columns: {list(self.df.columns)}")
+        
+        # Log strategy distribution
+        if 'strategy' in self.df.columns:
+            strategy_counts = self.df['strategy'].value_counts()
+            logger.info("Strategy distribution:")
+            for strategy, count in strategy_counts.items():
+                logger.info(f"  {strategy}: {count} ({count/len(self.df)*100:.1f}%)")
+    
+    @staticmethod
+    def parse_asset_types(x: Any) -> int:
+        """
+        Parse asset types from string or list format.
+        
+        Args:
+            x: Asset types in various formats (JSON, comma-separated, etc.)
+            
+        Returns:
+            Number of asset types
+        """
+        try:
+            if isinstance(x, str):
+                if x.startswith('['):
+                    parsed = json.loads(x)
+                    return len(parsed)
+                else:
+                    return len(x.split(','))
+            return 0
+        except Exception:
+            return 0
+    
+    def preprocess_data(self) -> None:
+        """Preprocess and encode features."""
+        logger.info("Preprocessing data...")
+        
+        # Parse asset types
+        logger.info("Parsing asset types...")
+        self.df['input_asset_count'] = self.df['input_asset_types'].apply(self.parse_asset_types)
+        self.df['output_asset_count'] = self.df['output_asset_types'].apply(self.parse_asset_types)
+        
+        # Encode categorical features
+        logger.info("Encoding categorical features...")
+        categorical_features = ['time_in_force', 'optimization_goal', 'benchmark_source', 'client_platform']
+        
+        for col in categorical_features:
+            le = LabelEncoder()
+            self.df[col + '_encoded'] = le.fit_transform(self.df[col].astype(str))
+            self.label_encoders[col] = le
+            logger.info(f"  {col}: {len(le.classes_)} classes - {list(le.classes_)}")
+        
+        # Define intent features (30 total)
+        self.intent_features = [
+            # Numerical (21)
+            'solver_window_ms', 'user_decision_timeout_ms', 'time_to_deadline_ms',
+            'max_slippage_bps', 'max_gas_cost_usd', 'max_hops',
+            'surplus_weight', 'gas_cost_weight', 'execution_speed_weight', 'reputation_weight',
+            'input_count', 'output_count', 'input_value_usd', 'expected_output_value_usd',
+            'benchmark_confidence', 'expected_gas_usd', 'expected_slippage_bps',
+            'nlp_confidence', 'tag_count', 'input_asset_count', 'output_asset_count',
+            # Encoded categorical (4)
+            'time_in_force_encoded', 'optimization_goal_encoded',
+            'benchmark_source_encoded', 'client_platform_encoded',
+            # Boolean (5)
+            'has_whitelist', 'has_blacklist', 'has_limit_price',
+            'require_simulation', 'has_nlp_input'
+        ]
+        
+        logger.info(f"Total intent features: {len(self.intent_features)}")
+        
+        # Encode ground truth labels
+        logger.info("Encoding ground truth labels...")
+        gt_labels = ['primary_category', 'detected_priority', 'complexity_level', 'risk_level']
+        
+        for label in gt_labels:
+            le = LabelEncoder()
+            self.df[label + '_encoded'] = le.fit_transform(self.df[label].astype(str))
+            self.gt_encoders[label] = le
+            logger.info(f"  {label}: {len(le.classes_)} classes - {list(le.classes_)}")
+        
+        # Encode strategy
+        logger.info("Encoding strategy...")
+        self.strategy_encoder = LabelEncoder()
+        self.df['strategy_encoded'] = self.strategy_encoder.fit_transform(self.df['strategy'].astype(str))
+        logger.info(f"  strategy: {len(self.strategy_encoder.classes_)} classes - {list(self.strategy_encoder.classes_)}")
+        
+        logger.info("Preprocessing complete")
+    
+    def prepare_train_test_split(self, test_size: float = 0.2) -> Tuple[np.ndarray, ...]:
+        """
+        Prepare train/test split with feature scaling.
+        
+        Args:
+            test_size: Fraction of data to use for testing
+            
+        Returns:
+            Tuple of train and test arrays
+        """
+        logger.info("Preparing train/test split...")
+        
+        # Extract features
+        X = self.df[self.intent_features].values
+        
+        # Extract labels
+        y_pc = self.df['primary_category_encoded'].values
+        y_dp = self.df['detected_priority_encoded'].values
+        y_cl = self.df['complexity_level_encoded'].values
+        y_rl = self.df['risk_level_encoded'].values
+        y_st = self.df['strategy_encoded'].values
+        y_weights = self.df[self.weight_columns].values
+        
+        # Convert labels to categorical
+        num_pc_classes = len(self.gt_encoders['primary_category'].classes_)
+        num_dp_classes = len(self.gt_encoders['detected_priority'].classes_)
+        num_cl_classes = len(self.gt_encoders['complexity_level'].classes_)
+        num_rl_classes = len(self.gt_encoders['risk_level'].classes_)
+        num_st_classes = len(self.strategy_encoder.classes_)
+        
+        y_pc_cat = keras.utils.to_categorical(y_pc, num_pc_classes)
+        y_dp_cat = keras.utils.to_categorical(y_dp, num_dp_classes)
+        y_cl_cat = keras.utils.to_categorical(y_cl, num_cl_classes)
+        y_rl_cat = keras.utils.to_categorical(y_rl, num_rl_classes)
+        y_st_cat = keras.utils.to_categorical(y_st, num_st_classes)
+        
+        # Train/test split
+        logger.info(f"Splitting data: {100*(1-test_size):.0f}% train, {100*test_size:.0f}% test")
+        split_result = train_test_split(
+            X, y_pc_cat, y_dp_cat, y_cl_cat, y_rl_cat, y_st_cat, y_weights,
+            test_size=test_size,
+            random_state=self.random_seed,
+            stratify=y_st
+        )
+        
+        (X_train, X_test, y_train_pc, y_test_pc, y_train_dp, y_test_dp,
+         y_train_cl, y_test_cl, y_train_rl, y_test_rl, y_train_st, y_test_st,
+         y_train_w, y_test_w) = split_result
+        
+        logger.info(f"Train samples: {len(X_train)}")
+        logger.info(f"Test samples: {len(X_test)}")
+        
+        # Scale features
+        logger.info("Scaling features...")
+        self.scaler = StandardScaler()
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Reshape for CNN1D (batch_size, sequence_length, features)
+        X_train_reshaped = X_train_scaled.reshape(X_train_scaled.shape[0], -1, 1)
+        X_test_reshaped = X_test_scaled.reshape(X_test_scaled.shape[0], -1, 1)
+        
+        logger.info(f"Input shape: {X_train_reshaped.shape}")
+        
+        return (X_train_reshaped, X_test_reshaped,
+                y_train_pc, y_test_pc, y_train_dp, y_test_dp,
+                y_train_cl, y_test_cl, y_train_rl, y_test_rl,
+                y_train_st, y_test_st, y_train_w, y_test_w)
+    
+    def build_model(self) -> None:
+        """Build the CNN-based multi-task model."""
+        logger.info("Building model architecture...")
+        
+        num_features = len(self.intent_features)
+        num_pc_classes = len(self.gt_encoders['primary_category'].classes_)
+        num_dp_classes = len(self.gt_encoders['detected_priority'].classes_)
+        num_cl_classes = len(self.gt_encoders['complexity_level'].classes_)
+        num_rl_classes = len(self.gt_encoders['risk_level'].classes_)
+        num_st_classes = len(self.strategy_encoder.classes_)
+        num_weights = len(self.weight_columns)
+        
+        # Input layer
+        inputs = layers.Input(shape=(num_features, 1), name='intent_input')
+        
+        # CNN layers
+        x = layers.Conv1D(128, 3, activation='relu', padding='same')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.3)(x)
+        
+        x = layers.Conv1D(64, 3, activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.3)(x)
+        
+        x = layers.GlobalMaxPooling1D()(x)
+        
+        # Shared dense layers
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(0.4)(x)
+        
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        
+        # Output heads
+        primary_category_output = layers.Dense(
+            num_pc_classes, activation='softmax', name='primary_category'
+        )(x)
+        
+        detected_priority_output = layers.Dense(
+            num_dp_classes, activation='softmax', name='detected_priority'
+        )(x)
+        
+        complexity_level_output = layers.Dense(
+            num_cl_classes, activation='softmax', name='complexity_level'
+        )(x)
+        
+        risk_level_output = layers.Dense(
+            num_rl_classes, activation='softmax', name='risk_level'
+        )(x)
+        
+        strategy_output = layers.Dense(
+            num_st_classes, activation='softmax', name='strategy'
+        )(x)
+        
+        weights_output = layers.Dense(
+            num_weights, activation='softmax', name='weights'
+        )(x)
+        
+        # Create model
+        self.model = Model(
+            inputs=inputs,
+            outputs=[
+                primary_category_output,
+                detected_priority_output,
+                complexity_level_output,
+                risk_level_output,
+                strategy_output,
+                weights_output
+            ]
+        )
+        
+        # Compile model
+        self.model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=0.001),
+            loss={
+                'primary_category': 'categorical_crossentropy',
+                'detected_priority': 'categorical_crossentropy',
+                'complexity_level': 'categorical_crossentropy',
+                'risk_level': 'categorical_crossentropy',
+                'strategy': 'categorical_crossentropy',
+                'weights': 'mse'
+            },
+            loss_weights={
+                'primary_category': 1.0,
+                'detected_priority': 1.0,
+                'complexity_level': 1.0,
+                'risk_level': 1.0,
+                'strategy': 2.0,
+                'weights': 3.0
+            },
+            metrics={
+                'primary_category': 'accuracy',
+                'detected_priority': 'accuracy',
+                'complexity_level': 'accuracy',
+                'risk_level': 'accuracy',
+                'strategy': 'accuracy',
+                'weights': 'mae'
+            }
+        )
+        
+        logger.info("Model built successfully")
+        logger.info(f"Total parameters: {self.model.count_params():,}")
+    
+    def train(
+        self,
+        X_train: np.ndarray,
+        y_train_dict: Dict[str, np.ndarray],
+        X_val: np.ndarray,
+        y_val_dict: Dict[str, np.ndarray],
+        epochs: int = 150,
+        batch_size: int = 32
+    ) -> None:
+        """
+        Train the model.
+        
+        Args:
+            X_train: Training features
+            y_train_dict: Training labels dictionary
+            X_val: Validation features
+            y_val_dict: Validation labels dictionary
+            epochs: Maximum number of epochs
+            batch_size: Batch size for training
+        """
+        logger.info("Starting training...")
+        logger.info(f"Epochs: {epochs}")
+        logger.info(f"Batch size: {batch_size}")
+        
+        # Callbacks
+        callbacks = [
+            keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=20,
+                restore_best_weights=True,
+                verbose=1
+            ),
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=7,
+                min_lr=1e-6,
+                verbose=1
+            ),
+            keras.callbacks.ModelCheckpoint(
+                str(self.model_save_path),
+                monitor='val_loss',
+                save_best_only=True,
+                verbose=1
+            )
+        ]
+        
+        # Train
+        self.history = self.model.fit(
+            X_train,
+            y_train_dict,
+            validation_data=(X_val, y_val_dict),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        logger.info("Training completed")
+    
+    def evaluate(
+        self,
+        X_test: np.ndarray,
+        y_test_dict: Dict[str, np.ndarray]
+    ) -> Dict[str, float]:
+        """
+        Evaluate the model on test data.
+        
+        Args:
+            X_test: Test features
+            y_test_dict: Test labels dictionary
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        logger.info("Evaluating model on test set...")
+        
+        test_loss = self.model.evaluate(X_test, y_test_dict, verbose=0)
+        
+        metrics = {
+            'total_loss': test_loss[0],
+            'primary_category_accuracy': test_loss[6],
+            'detected_priority_accuracy': test_loss[7],
+            'complexity_level_accuracy': test_loss[8],
+            'risk_level_accuracy': test_loss[9],
+            'strategy_accuracy': test_loss[10],
+            'weights_mae': test_loss[11]
+        }
+        
+        logger.info("=" * 60)
+        logger.info("FINAL TEST RESULTS")
+        logger.info("=" * 60)
+        logger.info(f"Total Loss: {metrics['total_loss']:.4f}")
+        logger.info("")
+        logger.info("Accuracy Metrics:")
+        logger.info(f"  Primary Category: {metrics['primary_category_accuracy']:.2%}")
+        logger.info(f"  Detected Priority: {metrics['detected_priority_accuracy']:.2%}")
+        logger.info(f"  Complexity Level: {metrics['complexity_level_accuracy']:.2%}")
+        logger.info(f"  Risk Level: {metrics['risk_level_accuracy']:.2%}")
+        logger.info(f"  Strategy: {metrics['strategy_accuracy']:.2%}")
+        logger.info(f"  Weights MAE: {metrics['weights_mae']:.4f}")
+        logger.info("=" * 60)
+        
+        return metrics
+    
+    def save_artifacts(self) -> None:
+        """Save preprocessing artifacts."""
+        logger.info("Saving preprocessing artifacts...")
+        
+        artifacts = {
+            'label_encoders': self.label_encoders,
+            'gt_encoders': self.gt_encoders,
+            'strategy_encoder': self.strategy_encoder,
+            'scaler': self.scaler,
+            'intent_features': self.intent_features,
+            'weight_columns': self.weight_columns
+        }
+        
+        with open(self.artifacts_save_path, 'wb') as f:
+            pickle.dump(artifacts, f)
+        
+        logger.info(f"Artifacts saved to {self.artifacts_save_path}")
+    
+    def run_training_pipeline(
+        self,
+        test_size: float = 0.2,
+        epochs: int = 150,
+        batch_size: int = 32
+    ) -> Dict[str, float]:
+        """
+        Run the complete training pipeline.
+        
+        Args:
+            test_size: Fraction of data for testing
+            epochs: Maximum training epochs
+            batch_size: Batch size for training
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        logger.info("=" * 60)
+        logger.info("STARTING TRAINING PIPELINE")
+        logger.info("=" * 60)
+        
+        # Load and preprocess data
+        self.load_data()
+        self.preprocess_data()
+        
+        # Prepare data
+        (X_train, X_test,
+         y_train_pc, y_test_pc, y_train_dp, y_test_dp,
+         y_train_cl, y_test_cl, y_train_rl, y_test_rl,
+         y_train_st, y_test_st, y_train_w, y_test_w) = self.prepare_train_test_split(test_size)
+        
+        # Build model
+        self.build_model()
+        
+        # Train
+        y_train_dict = {
+            'primary_category': y_train_pc,
+            'detected_priority': y_train_dp,
+            'complexity_level': y_train_cl,
+            'risk_level': y_train_rl,
+            'strategy': y_train_st,
+            'weights': y_train_w
+        }
+        
+        y_test_dict = {
             'primary_category': y_test_pc,
             'detected_priority': y_test_dp,
             'complexity_level': y_test_cl,
@@ -276,101 +574,47 @@ history = model.fit(
             'strategy': y_test_st,
             'weights': y_test_w
         }
-    ),
-    epochs=100,
-    batch_size=32,
-    callbacks=callbacks,
-    verbose=1
-)
+        
+        self.train(X_train, y_train_dict, X_test, y_test_dict, epochs, batch_size)
+        
+        # Evaluate
+        metrics = self.evaluate(X_test, y_test_dict)
+        
+        # Save artifacts
+        self.save_artifacts()
+        
+        logger.info("=" * 60)
+        logger.info("TRAINING PIPELINE COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Model saved to: {self.model_save_path}")
+        logger.info(f"Artifacts saved to: {self.artifacts_save_path}")
+        
+        return metrics
 
-# ============================
-# 7. EVALUATE MODEL
-# ============================
-print("\n📊 Evaluating model...")
 
-test_results = model.evaluate(
-    X_test,
-    {
-        'primary_category': y_test_pc,
-        'detected_priority': y_test_dp,
-        'complexity_level': y_test_cl,
-        'risk_level': y_test_rl,
-        'strategy': y_test_st,
-        'weights': y_test_w
-    },
-    verbose=0
-)
-
-print("\n🎯 Test Results:")
-metric_names = model.metrics_names
-for i, (name, value) in enumerate(zip(metric_names, test_results)):
-    if 'accuracy' in name or 'mae' in name:
-        print(f"   {name}: {value:.4f}")
-
-# ============================
-# 8. SAVE ARTIFACTS
-# ============================
-print("\n💾 Saving model and artifacts...")
-
-# Save model
-model.save('/home/nguyen-viet-an/intenus/ai_model/intent_classifier_model.keras')
-
-# Save encoders and scaler
-artifacts = {
-    'scaler': scaler,
-    'label_encoders': label_encoders,
-    'gt_encoders': gt_encoders,
-    'strategy_encoder': strategy_encoder,
-    'intent_features': intent_features,
-    'feature_columns': intent_features
-}
-
-with open('/home/nguyen-viet-an/intenus/ai_model/model_artifacts.pkl', 'wb') as f:
-    pickle.dump(artifacts, f)
-
-print("✅ Model saved to: intent_classifier_model.keras")
-print("✅ Artifacts saved to: model_artifacts.pkl")
-
-# ============================
-# 9. TEST INFERENCE
-# ============================
-print("\n🔮 Testing inference on random samples...")
-
-# Select 3 random test samples
-test_indices = np.random.choice(len(X_test), 3, replace=False)
-
-for idx in test_indices:
-    sample = X_test[idx:idx+1]
+def main():
+    """Main training function."""
+    # Configuration
+    DATA_SOURCE = 'https://wal-aggregator-testnet.staketab.org/v1/blobs/by-quilt-patch-id/yoSJPzv1ykudTccWun7qElklLEmvY3J9fK3mPZzUeroBAQDoAQ'
+    MODEL_SAVE_PATH = '/home/nguyen-viet-an/intenus/ai_model/model/intent_classifier_model.keras'
+    ARTIFACTS_SAVE_PATH = '/home/nguyen-viet-an/intenus/ai_model/model/model_artifacts.pkl'
     
-    # Predict
-    predictions = model.predict(sample, verbose=0)
-    pred_pc, pred_dp, pred_cl, pred_rl, pred_st, pred_weights = predictions
+    # Create trainer
+    trainer = IntentClassifierTrainer(
+        data_source=DATA_SOURCE,
+        model_save_path=MODEL_SAVE_PATH,
+        artifacts_save_path=ARTIFACTS_SAVE_PATH
+    )
     
-    # Decode predictions
-    pc_class = gt_encoders['primary_category'].inverse_transform([np.argmax(pred_pc[0])])[0]
-    dp_class = gt_encoders['detected_priority'].inverse_transform([np.argmax(pred_dp[0])])[0]
-    cl_class = gt_encoders['complexity_level'].inverse_transform([np.argmax(pred_cl[0])])[0]
-    rl_class = gt_encoders['risk_level'].inverse_transform([np.argmax(pred_rl[0])])[0]
-    st_class = strategy_encoder.inverse_transform([np.argmax(pred_st[0])])[0]
-    weights = pred_weights[0]
+    # Run training pipeline
+    metrics = trainer.run_training_pipeline(
+        test_size=0.2,
+        epochs=150,
+        batch_size=32
+    )
     
-    print(f"\n--- Sample {idx+1} ---")
-    print(f"Ground Truth:")
-    print(f"  Primary Category: {gt_encoders['primary_category'].inverse_transform([y_test_pc[idx]])[0]}")
-    print(f"  Detected Priority: {gt_encoders['detected_priority'].inverse_transform([y_test_dp[idx]])[0]}")
-    print(f"  Complexity: {gt_encoders['complexity_level'].inverse_transform([y_test_cl[idx]])[0]}")
-    print(f"  Risk: {gt_encoders['risk_level'].inverse_transform([y_test_rl[idx]])[0]}")
-    print(f"  Strategy: {strategy_encoder.inverse_transform([y_test_st[idx]])[0]}")
-    print(f"  Weights: {y_test_w[idx]}")
-    
-    print(f"\nPredictions:")
-    print(f"  Primary Category: {pc_class} (conf: {np.max(pred_pc[0]):.3f})")
-    print(f"  Detected Priority: {dp_class} (conf: {np.max(pred_dp[0]):.3f})")
-    print(f"  Complexity: {cl_class} (conf: {np.max(pred_cl[0]):.3f})")
-    print(f"  Risk: {rl_class} (conf: {np.max(pred_rl[0]):.3f})")
-    print(f"  Strategy: {st_class} (conf: {np.max(pred_st[0]):.3f})")
-    print(f"  Weights: [{weights[0]:.3f}, {weights[1]:.3f}, {weights[2]:.3f}] (sum: {weights.sum():.3f})")
+    return metrics
 
-print("\n" + "="*60)
-print("🎉 Training completed successfully!")
-print("="*60)
+
+if __name__ == "__main__":
+    main()
