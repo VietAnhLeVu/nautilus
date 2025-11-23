@@ -215,11 +215,11 @@ fn calculate_score(
 
     // Apply ML-derived weights
     let weighted_score_f64 = match intent_classification.strategy {
-        "Surplus-First"=> weights.git_weight_surpluse_usd*features.surplus_usd + weights.gt_weight_gas_cost*(1/feateus.gas_cost) + gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
+        "Surplus-First"=> weights.git_weight_surpluse_usd*features.surplus_usd + weights.gt_weight_gas_cost*(1.0/feateus.gas_cost) + gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
         "Cost-Minimization"=> weights.gt_weight_gas_cost*(features.gas_cost) + weights.gt_weight_surplus_percentage*features.surplus_percentage + weights.gt_weight_solver_success_rate*features.solver_success_rate.unwrap_or(0.5),
-        "Surplus-Maximization"=> features.surplus_usd*weights.git_weight_surpluse_usd + features.surplus_percentage*weights.surplus_percentage + weights.gt_weight_total_hops*1/features.total_hops + weights.gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
-        "Speed-Priority"=> weights.gt_weight_estimated_execution_time*1/features.estimated_execution_time.unwrap_or(0.5)+weights.gt_weight_solver_success_rate.unwrap_or(0.5) + weights.gt_weight_surplus_usd*features.surplus_usd + weights.gt_weight_gas_cost*1/features.gas_cost,
-        "Reliability-Focus"=> weights.gt_weight_solver_success_rate*features.solver_success_rate.unwrap_or(0.5)+weights.gt_weight_total_hops*1/features.total_hops +weights.gt_weight_surplus_usd*features.surplus_usd + weights.gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
+        "Surplus-Maximization"=> features.surplus_usd*weights.gt_weight_surpluse_usd + features.surplus_percentage*weights.surplus_percentage + weights.gt_weight_total_hops*1.0/features.total_hops + weights.gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
+        "Speed-Priority"=> weights.gt_weight_estimated_execution_time*1.0/features.estimated_execution_time.unwrap_or(0.5)+weights.gt_weight_solver_success_rate.unwrap_or(0.5) + weights.gt_weight_surplus_usd*features.surplus_usd + weights.gt_weight_gas_cost*1.0/features.gas_cost,
+        "Reliability-Focus"=> weights.gt_weight_solver_success_rate*features.solver_success_rate.unwrap_or(0.5)+weights.gt_weight_total_hops*1.0/features.total_hops +weights.gt_weight_surplus_usd*features.surplus_usd + weights.gt_weight_solver_reputation_score*features.solver_reputation_score.unwrap_or(0.5),
     }
 
     // Convert to u64 scaled by 100 (e.g., 85.5 -> 8550)
