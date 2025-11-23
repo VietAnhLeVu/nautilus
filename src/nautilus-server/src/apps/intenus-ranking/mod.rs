@@ -112,13 +112,14 @@ pub struct PreRankingResult {
 }
 
 // ===== Output Types (Ranking Result) =====
+// Note: All scores are scaled by 100 (e.g., 85.5% = 8550) to avoid f64 in BCS
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScoreBreakdown {
-    pub surplus_score: f64,
-    pub cost_score: f64,
-    pub speed_score: f64,
-    pub reputation_score: f64,
+    pub surplus_score: u64,      // Scaled by 100
+    pub cost_score: u64,          // Scaled by 100
+    pub speed_score: u64,         // Scaled by 100
+    pub reputation_score: u64,    // Scaled by 100
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -126,13 +127,13 @@ pub struct SolutionReasoning {
     pub primary_reason: String,
     pub secondary_reasons: Vec<String>,
     pub risk_assessment: String,
-    pub confidence_level: f64,
+    pub confidence_level: u64,    // Scaled by 10000 (0-10000 for 0.0-1.0)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RankedSolution {
     pub rank: u32,
-    pub score: f64,
+    pub score: u64,               // Scaled by 100 (0-10000 for 0-100.0)
     pub solution_id: String,
     pub solver_address: String,
     pub transaction_bytes: String,
@@ -140,7 +141,7 @@ pub struct RankedSolution {
     pub reasoning: SolutionReasoning,
     pub personalization_applied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_fit_score: Option<f64>,
+    pub user_fit_score: Option<u64>,  // Scaled by 100
     pub warnings: Vec<String>,
     pub expires_at: u64,
 }
@@ -148,7 +149,7 @@ pub struct RankedSolution {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RankingMetadata {
     pub total_solutions: u32,
-    pub average_score: f64,
+    pub average_score: u64,       // Scaled by 100
     pub strategy: String,
     pub intent_category: String,
 }
@@ -169,7 +170,7 @@ fn calculate_score(
     features: &SolutionFeatures,
     weights: &ClassificationWeights,
     intent_classification: &IntentClassification,
-) -> (f64, ScoreBreakdown) {
+) -> (u64, ScoreBreakdown) {
     // Normalize features to 0-1 range (assuming reasonable bounds)
     let surplus_norm = (features.surplus_usd / 1000.0).min(1.0).max(0.0);
     let surplus_pct_norm = (features.surplus_percentage / 10.0).min(1.0).max(0.0);
@@ -191,32 +192,39 @@ fn calculate_score(
     let reputation_norm = features.solver_reputation_score.unwrap_or(0.5);
     let success_rate_norm = features.solver_success_rate.unwrap_or(0.5);
 
-    // Calculate component scores based on detected priority
-    let surplus_score = match intent_classification.detected_priority.as_str() {
+    // Calculate component scores based on detected priority (0-100 range, as f64)
+    let surplus_score_f64 = match intent_classification.detected_priority.as_str() {
         "output" => (surplus_norm * 0.6 + surplus_pct_norm * 0.4) * 100.0,
         "balanced" => (surplus_norm * 0.5 + surplus_pct_norm * 0.5) * 100.0,
         _ => (surplus_norm * 0.4 + surplus_pct_norm * 0.6) * 100.0,
     };
 
-    let cost_score = match intent_classification.detected_priority.as_str() {
+    let cost_score_f64 = match intent_classification.detected_priority.as_str() {
         "cost" => (gas_norm * 0.5 + protocol_fees_norm * 0.3 + total_cost_norm * 0.2) * 100.0,
         "balanced" => (gas_norm * 0.4 + protocol_fees_norm * 0.3 + total_cost_norm * 0.3) * 100.0,
         _ => (gas_norm * 0.3 + protocol_fees_norm * 0.3 + total_cost_norm * 0.4) * 100.0,
     };
 
-    let speed_score = match intent_classification.detected_priority.as_str() {
+    let speed_score_f64 = match intent_classification.detected_priority.as_str() {
         "speed" => (time_norm * 0.6 + hops_norm * 0.3 + protocols_norm * 0.1) * 100.0,
         "balanced" => (time_norm * 0.4 + hops_norm * 0.3 + protocols_norm * 0.3) * 100.0,
         _ => (time_norm * 0.3 + hops_norm * 0.4 + protocols_norm * 0.3) * 100.0,
     };
 
-    let reputation_score = (reputation_norm * 0.6 + success_rate_norm * 0.4) * 100.0;
+    let reputation_score_f64 = (reputation_norm * 0.6 + success_rate_norm * 0.4) * 100.0;
 
     // Apply ML-derived weights
-    let weighted_score = surplus_score * weights.gt_weight_surplus_usd
-        + cost_score * weights.gt_weight_gas_cost
-        + speed_score * weights.gt_weight_estimated_execution_time
-        + reputation_score * weights.gt_weight_solver_reputation_score;
+    let weighted_score_f64 = surplus_score_f64 * weights.gt_weight_surplus_usd
+        + cost_score_f64 * weights.gt_weight_gas_cost
+        + speed_score_f64 * weights.gt_weight_estimated_execution_time
+        + reputation_score_f64 * weights.gt_weight_solver_reputation_score;
+
+    // Convert to u64 scaled by 100 (e.g., 85.5 -> 8550)
+    let surplus_score = (surplus_score_f64 * 100.0).round() as u64;
+    let cost_score = (cost_score_f64 * 100.0).round() as u64;
+    let speed_score = (speed_score_f64 * 100.0).round() as u64;
+    let reputation_score = (reputation_score_f64 * 100.0).round() as u64;
+    let weighted_score = (weighted_score_f64 * 100.0).round().min(10000.0).max(0.0) as u64;
 
     let breakdown = ScoreBreakdown {
         surplus_score,
@@ -225,7 +233,7 @@ fn calculate_score(
         reputation_score,
     };
 
-    (weighted_score.min(100.0).max(0.0), breakdown)
+    (weighted_score, breakdown)
 }
 
 fn generate_reasoning(
@@ -235,23 +243,24 @@ fn generate_reasoning(
 ) -> SolutionReasoning {
     let mut secondary_reasons = Vec::new();
 
+    // Note: scores are scaled by 100, so 8000 = 80.00
     let primary_reason = match intent_classification.detected_priority.as_str() {
         "output" => {
-            if score_breakdown.surplus_score > 80.0 {
+            if score_breakdown.surplus_score > 8000 {
                 "Excellent surplus generation aligning with output-focused priority"
             } else {
                 "Moderate surplus generation for output priority"
             }
         }
         "cost" => {
-            if score_breakdown.cost_score > 80.0 {
+            if score_breakdown.cost_score > 8000 {
                 "Highly cost-efficient solution minimizing fees"
             } else {
                 "Acceptable cost efficiency"
             }
         }
         "speed" => {
-            if score_breakdown.speed_score > 80.0 {
+            if score_breakdown.speed_score > 8000 {
                 "Fast execution with minimal complexity"
             } else {
                 "Moderate execution speed"
@@ -285,10 +294,12 @@ fn generate_reasoning(
     }
     .to_string();
 
-    let confidence_level = (intent_classification.strategy_confidence * 0.5
+    // Convert confidence to u64 scaled by 10000 (0.0-1.0 -> 0-10000)
+    let confidence_f64 = (intent_classification.strategy_confidence * 0.5
         + intent_classification.detected_priority_confidence * 0.5)
         .min(1.0)
         .max(0.0);
+    let confidence_level = (confidence_f64 * 10000.0).round() as u64;
 
     SolutionReasoning {
         primary_reason,
@@ -307,7 +318,7 @@ fn rank_solutions(pre_ranking: &PreRankingResult) -> Result<RankingResult, Encla
     let expiration_time = current_timestamp + 300_000; // 5 minutes
 
     let mut ranked_solutions: Vec<RankedSolution> = Vec::new();
-    let mut total_score = 0.0;
+    let mut total_score: u64 = 0;
 
     // Score each solution
     for feature_vec in &pre_ranking.feature_vectors {
@@ -348,19 +359,19 @@ fn rank_solutions(pre_ranking: &PreRankingResult) -> Result<RankingResult, Encla
             expires_at: expiration_time,
         });
 
-        total_score += score;
+        total_score = total_score.saturating_add(score);
     }
 
     // Sort by score descending and assign ranks
-    ranked_solutions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    ranked_solutions.sort_by(|a, b| b.score.cmp(&a.score));
     for (idx, solution) in ranked_solutions.iter_mut().enumerate() {
         solution.rank = (idx + 1) as u32;
     }
 
     let average_score = if !ranked_solutions.is_empty() {
-        total_score / ranked_solutions.len() as f64
+        total_score / ranked_solutions.len() as u64
     } else {
-        0.0
+        0
     };
 
     let best_solution = ranked_solutions.first().cloned();
@@ -466,11 +477,12 @@ mod tests {
 
         let (score, breakdown) = calculate_score(&features, &weights, &classification);
 
-        assert!(score >= 0.0 && score <= 100.0);
-        assert!(breakdown.surplus_score >= 0.0);
-        assert!(breakdown.cost_score >= 0.0);
-        assert!(breakdown.speed_score >= 0.0);
-        assert!(breakdown.reputation_score >= 0.0);
+        // Scores are scaled by 100, so max is 10000 (representing 100.00)
+        assert!(score <= 10000);
+        assert!(breakdown.surplus_score <= 10000);
+        assert!(breakdown.cost_score <= 10000);
+        assert!(breakdown.speed_score <= 10000);
+        assert!(breakdown.reputation_score <= 10000);
     }
 }
 

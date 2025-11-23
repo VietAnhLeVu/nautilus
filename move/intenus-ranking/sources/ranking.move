@@ -49,11 +49,12 @@ fun init(otw: RANKING, ctx: &mut TxContext) {
 }
 
 /// Simplified ranking result for Move (matching Rust struct)
+/// Note: Scores are scaled by 100 (e.g., 85.5% = 8550)
 public struct RankingResultPayload has copy, drop {
     intent_id: String,
     best_solution_id: String,
     best_solver_address: String,
-    best_score: u64,
+    best_score: u64,        // Scaled by 100 (0-10000 for 0-100.0)
     total_solutions: u64,
     strategy: String,
     intent_category: String,
