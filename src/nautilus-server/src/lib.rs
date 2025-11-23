@@ -21,6 +21,10 @@ mod apps {
     #[cfg(feature = "seal-example")]
     #[path = "seal-example/mod.rs"]
     pub mod seal_example;
+
+    #[cfg(feature = "intenus-ranking")]
+    #[path = "intenus-ranking/mod.rs"]
+    pub mod intenus_ranking;
 }
 
 pub mod app {
@@ -32,6 +36,9 @@ pub mod app {
 
     #[cfg(feature = "seal-example")]
     pub use crate::apps::seal_example::*;
+
+    #[cfg(feature = "intenus-ranking")]
+    pub use crate::apps::intenus_ranking::*;
 }
 
 pub mod common;

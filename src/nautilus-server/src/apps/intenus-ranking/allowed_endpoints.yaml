@@ -1,0 +1,4 @@
+# External endpoints that the enclave is allowed to access
+# For Intenus ranking, no external APIs are required - all computation is internal
+endpoints: []
+

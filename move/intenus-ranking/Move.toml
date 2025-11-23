@@ -1,0 +1,11 @@
+[package]
+name = "intenus_ranking"
+edition = "2024.beta"
+
+[dependencies]
+enclave = { local = "../enclave" }
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+intenus_ranking = "0x0"
+
