@@ -639,7 +639,7 @@ echo "Launching EC2 instance with Nitro Enclaves enabled..."
 INSTANCE_ID=$(aws ec2 run-instances \
   --region "$REGION" \
   --image-id "$AMI_ID" \
-  --instance-type m5.4xlarge \
+  --instance-type m5.xlarge \
   --key-name "$KEY_PAIR" \
   --user-data file://user-data.sh \
   --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":200}}]' \
