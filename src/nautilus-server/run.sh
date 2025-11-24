@@ -29,6 +29,7 @@ echo "127.0.0.1   localhost" > /etc/hosts
 
 
 
+
 # == ATTENTION: code should be generated here that parses allowed_endpoints.yaml and populate domains here ===
 
 cat /etc/hosts
@@ -46,6 +47,7 @@ echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpair
 
 # == ATTENTION: code should be generated here that added all hosts to forward traffic ===
 # Traffic-forwarder-block
+
 
 
 
