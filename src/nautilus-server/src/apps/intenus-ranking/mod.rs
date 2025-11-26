@@ -9,6 +9,13 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use sui_sdk_types::{
+    Argument, Command, Identifier, Input, MoveCall, ObjectId as ObjectID,
+    ProgrammableTransaction,
+};
+use fastcrypto::encoding::{Base64, Encoding, Hex};
+use fastcrypto::hash::{HashFunction, Sha256};
+use fastcrypto::traits::{KeyPair, Signer};
 
 /// ====
 /// Intenus Ranking Engine - Processes PreRanking results and produces ranked solutions
@@ -111,6 +118,56 @@ pub struct PreRankingResult {
     pub processed_at: u64,
 }
 
+// ===== Slash Types =====
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SlashConfig {
+    pub slash_manager_package_id: String,
+    pub slash_manager_object_id: String,
+    pub slash_manager_initial_version: u64,
+    pub tee_verifier_object_id: String,
+    pub tee_verifier_initial_version: u64,
+    pub clock_object_id: String,
+    pub enable_slashing: bool,
+}
+
+impl Default for SlashConfig {
+    fn default() -> Self {
+        Self {
+            // Placeholder values - should be loaded from environment
+            slash_manager_package_id: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            slash_manager_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            slash_manager_initial_version: 1,
+            tee_verifier_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            tee_verifier_initial_version: 1,
+            clock_object_id: "0x0000000000000000000000000000000000000000000000000000000000000006".to_string(),
+            enable_slashing: false,  // Disabled by default until configured
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SlashEvidence {
+    pub batch_id: u64,
+    pub solution_id: Vec<u8>,
+    pub solver_address: String,
+    pub severity: u8,
+    pub reason_code: u8,
+    pub reason_message: Vec<u8>,
+    pub failure_context: Vec<u8>,
+    pub attestation: Vec<u8>,
+    pub attestation_timestamp: u64,
+    pub tee_measurement: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SlashTransaction {
+    pub evidence: SlashEvidence,
+    pub ptb_bytes: String,          // BCS encoded PTB
+    pub signature: String,           // TEE signature
+    pub tee_public_key: String,     // TEE ephemeral public key
+}
+
 // ===== Output Types (Ranking Result) =====
 // Note: All scores are scaled by 100 (e.g., 85.5% = 8550) to avoid f64 in BCS
 
@@ -162,6 +219,256 @@ pub struct RankingResult {
     pub metadata: RankingMetadata,
     pub ranked_at: u64,
     pub expires_at: u64,
+    pub slash_transactions: Vec<SlashTransaction>,  // Slashing TXs to be submitted
+}
+
+// ===== Slash Logic =====
+
+/// Severity constants matching slash_manager.move
+const SEVERITY_MINOR: u8 = 1;
+const SEVERITY_SIGNIFICANT: u8 = 2;
+const SEVERITY_MALICIOUS: u8 = 3;
+
+/// Reason codes for slashing
+const REASON_INVALID_SOLUTION: u8 = 1;
+const REASON_CONSTRAINT_VIOLATION: u8 = 2;
+const REASON_INCORRECT_SURPLUS: u8 = 3;
+const REASON_FAILED_EXECUTION: u8 = 4;
+
+/// Create a ProgrammableTransaction for submit_slash
+fn create_submit_slash_ptb(
+    slash_manager_package_id: ObjectID,
+    slash_manager_object_id: ObjectID,
+    slash_manager_initial_shared_version: u64,
+    tee_verifier_object_id: ObjectID,
+    tee_verifier_initial_shared_version: u64,
+    clock_object_id: ObjectID,
+    evidence: &SlashEvidence,
+) -> Result<ProgrammableTransaction, Box<dyn std::error::Error>> {
+    let mut inputs = vec![];
+    
+    // Input 0: SlashManager (shared mutable)
+    inputs.push(Input::Shared {
+        object_id: slash_manager_object_id,
+        initial_shared_version: slash_manager_initial_shared_version,
+        mutable: true,
+    });
+    
+    // Input 1: TeeVerifier (shared immutable)
+    inputs.push(Input::Shared {
+        object_id: tee_verifier_object_id,
+        initial_shared_version: tee_verifier_initial_shared_version,
+        mutable: false,
+    });
+    
+    // Input 2: SlashEvidence struct (created inline)
+    // We need to create the struct using move_call to intenus::slash_manager
+    // For now, we'll pass the evidence fields as individual inputs
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.batch_id)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.solution_id)?,
+    });
+    
+    // Parse solver address string to address bytes
+    let solver_addr_str = evidence.solver_address.trim_start_matches("0x");
+    let solver_addr_bytes = hex::decode(solver_addr_str)
+        .map_err(|e| format!("Invalid solver address: {}", e))?;
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&solver_addr_bytes)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.severity)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.reason_code)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.reason_message)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.failure_context)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.attestation)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.attestation_timestamp)?,
+    });
+    
+    inputs.push(Input::Pure {
+        value: bcs::to_bytes(&evidence.tee_measurement)?,
+    });
+    
+    // Input: Clock (shared immutable)
+    inputs.push(Input::Shared {
+        object_id: clock_object_id,
+        initial_shared_version: 1,  // Clock is typically at version 1
+        mutable: false,
+    });
+    
+    // Create the SlashEvidence struct first
+    let create_evidence_call = MoveCall {
+        package: slash_manager_package_id,
+        module: Identifier::new("slash_manager")?,
+        function: Identifier::new("create_slash_evidence")?,  // Helper function we'd need in Move
+        type_arguments: vec![],
+        arguments: vec![
+            Argument::Input(2),  // batch_id
+            Argument::Input(3),  // solution_id
+            Argument::Input(4),  // solver_address
+            Argument::Input(5),  // severity
+            Argument::Input(6),  // reason_code
+            Argument::Input(7),  // reason_message
+            Argument::Input(8),  // failure_context
+            Argument::Input(9),  // attestation
+            Argument::Input(10), // attestation_timestamp
+            Argument::Input(11), // tee_measurement
+        ],
+    };
+    
+    // Call submit_slash
+    let submit_slash_call = MoveCall {
+        package: slash_manager_package_id,
+        module: Identifier::new("slash_manager")?,
+        function: Identifier::new("submit_slash")?,
+        type_arguments: vec![],
+        arguments: vec![
+            Argument::Input(0),      // SlashManager
+            Argument::Input(1),      // TeeVerifier
+            Argument::Result(0),     // SlashEvidence from previous call
+            Argument::Input(12),     // Clock
+        ],
+    };
+    
+    let commands = vec![
+        Command::MoveCall(create_evidence_call),
+        Command::MoveCall(submit_slash_call),
+    ];
+    
+    Ok(ProgrammableTransaction { inputs, commands })
+}
+
+/// Detect solutions that need slashing based on failed validations
+fn detect_slashable_solutions(
+    pre_ranking: &PreRankingResult,
+    ranked_solutions: &[RankedSolution],
+) -> Vec<SlashEvidence> {
+    let mut evidence_list = Vec::new();
+    let current_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    
+    // Slash failed solutions
+    for failed in &pre_ranking.failed_solution_ids {
+        let severity = if failed.failure_reason.contains("malicious") || 
+                         failed.failure_reason.contains("fraud") {
+            SEVERITY_MALICIOUS
+        } else if failed.failure_reason.contains("constraint") ||
+                  failed.failure_reason.contains("validation") {
+            SEVERITY_SIGNIFICANT
+        } else {
+            SEVERITY_MINOR
+        };
+        
+        let reason_code = if failed.failure_reason.contains("constraint") {
+            REASON_CONSTRAINT_VIOLATION
+        } else if failed.failure_reason.contains("surplus") {
+            REASON_INCORRECT_SURPLUS
+        } else if failed.failure_reason.contains("execution") {
+            REASON_FAILED_EXECUTION
+        } else {
+            REASON_INVALID_SOLUTION
+        };
+        
+        // Create TEE attestation for this slash
+        let mut hasher = Sha256::new();
+        hasher.update(failed.solution_id.as_bytes());
+        hasher.update(&[severity]);
+        hasher.update(failed.failure_reason.as_bytes());
+        hasher.update(&current_timestamp.to_le_bytes());
+        let attestation_hash = hasher.finalize();
+        
+        evidence_list.push(SlashEvidence {
+            batch_id: current_timestamp / 1000,  // Use timestamp as batch ID
+            solution_id: failed.solution_id.as_bytes().to_vec(),
+            solver_address: "0x0000000000000000000000000000000000000000".to_string(), // Would need from submission data
+            severity,
+            reason_code,
+            reason_message: failed.failure_reason.as_bytes().to_vec(),
+            failure_context: serde_json::to_vec(&failed.errors).unwrap_or_default(),
+            attestation: attestation_hash.to_vec(),
+            attestation_timestamp: current_timestamp,
+            tee_measurement: vec![0u8; 32],  // Would be real PCR values from TEE
+        });
+    }
+    
+    // Also slash solutions with extremely low scores (potential gaming)
+    for solution in ranked_solutions {
+        if solution.score < 1000 && solution.warnings.len() >= 2 {  // Score < 10.0 with multiple warnings
+            let mut hasher = Sha256::new();
+            hasher.update(solution.solution_id.as_bytes());
+            hasher.update(&[SEVERITY_MINOR]);
+            hasher.update(b"Low quality solution");
+            hasher.update(&current_timestamp.to_le_bytes());
+            let attestation_hash = hasher.finalize();
+            
+            evidence_list.push(SlashEvidence {
+                batch_id: current_timestamp / 1000,
+                solution_id: solution.solution_id.as_bytes().to_vec(),
+                solver_address: solution.solver_address.clone(),
+                severity: SEVERITY_MINOR,
+                reason_code: REASON_INVALID_SOLUTION,
+                reason_message: b"Low quality solution with multiple warnings".to_vec(),
+                failure_context: serde_json::to_vec(&solution.warnings).unwrap_or_default(),
+                attestation: attestation_hash.to_vec(),
+                attestation_timestamp: current_timestamp,
+                tee_measurement: vec![0u8; 32],
+            });
+        }
+    }
+    
+    evidence_list
+}
+
+/// Sign slash transaction with TEE ephemeral key
+fn sign_slash_transaction(
+    ptb: &ProgrammableTransaction,
+    evidence: &SlashEvidence,
+    tee_keypair: &fastcrypto::ed25519::Ed25519KeyPair,
+) -> Result<SlashTransaction, Box<dyn std::error::Error>> {
+    // Serialize PTB
+    let ptb_bytes = bcs::to_bytes(ptb)?;
+    
+    // Create message to sign: hash of (PTB || evidence)
+    let mut hasher = Sha256::new();
+    hasher.update(&ptb_bytes);
+    hasher.update(&evidence.attestation);
+    let message = hasher.finalize();
+    
+    // Sign with TEE key
+    let signature = tee_keypair.sign(&message);
+    let signature_bytes = signature.as_ref();
+    
+    // Get public key
+    let public_key = tee_keypair.public();
+    let public_key_bytes = public_key.as_ref();
+    
+    Ok(SlashTransaction {
+        evidence: evidence.clone(),
+        ptb_bytes: Base64::encode(&ptb_bytes),
+        signature: Hex::encode(signature_bytes),
+        tee_public_key: Hex::encode(public_key_bytes),
+    })
 }
 
 // ===== Ranking Logic =====
@@ -394,6 +701,7 @@ fn rank_solutions(pre_ranking: &PreRankingResult) -> Result<RankingResult, Encla
         metadata,
         ranked_at: current_timestamp,
         expires_at: expiration_time,
+        slash_transactions: Vec::new(),  // Will be populated in process_data
     })
 }
 
@@ -419,12 +727,76 @@ pub async fn process_data(
     }
 
     // Perform ranking
-    let ranking_result = rank_solutions(&pre_ranking)?;
+    let mut ranking_result = rank_solutions(&pre_ranking)?;
 
     let current_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| EnclaveError::GenericError(format!("Failed to get timestamp: {}", e)))?
         .as_millis() as u64;
+
+    // ===== SLASHING LOGIC =====
+    // Load slash configuration from environment or use defaults
+    let slash_config = SlashConfig::default();
+    
+    let mut slash_transactions = Vec::new();
+    
+    // Only proceed with slashing if enabled
+    if slash_config.enable_slashing {
+        // Detect solutions that need slashing based on failures and low quality
+        let slashable_evidence = detect_slashable_solutions(&pre_ranking, &ranking_result.ranked_solutions);
+        
+        // Parse object IDs from config
+        let parse_object_id = |s: &str| -> Result<ObjectID, EnclaveError> {
+            let hex = s.trim_start_matches("0x");
+            let bytes = hex::decode(hex)
+                .map_err(|e| EnclaveError::GenericError(format!("Invalid object ID: {}", e)))?;
+            if bytes.len() != 32 {
+                return Err(EnclaveError::GenericError("Object ID must be 32 bytes".to_string()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(ObjectID(arr))
+        };
+        
+        let slash_manager_pkg_id = parse_object_id(&slash_config.slash_manager_package_id)?;
+        let slash_manager_obj_id = parse_object_id(&slash_config.slash_manager_object_id)?;
+        let tee_verifier_obj_id = parse_object_id(&slash_config.tee_verifier_object_id)?;
+        let clock_obj_id = parse_object_id(&slash_config.clock_object_id)?;
+        
+        // Create slash transactions for each evidence
+        for evidence in slashable_evidence {
+            // Create PTB for submit_slash
+            match create_submit_slash_ptb(
+                slash_manager_pkg_id,
+                slash_manager_obj_id,
+                slash_config.slash_manager_initial_version,
+                tee_verifier_obj_id,
+                slash_config.tee_verifier_initial_version,
+                clock_obj_id,
+                &evidence,
+            ) {
+                Ok(ptb) => {
+                    // Sign the transaction with TEE ephemeral key
+                    match sign_slash_transaction(&ptb, &evidence, &state.eph_kp) {
+                        Ok(slash_tx) => {
+                            slash_transactions.push(slash_tx);
+                        }
+                        Err(e) => {
+                            // Log error but don't fail the ranking
+                            eprintln!("Failed to sign slash transaction: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log error but don't fail the ranking
+                    eprintln!("Failed to create slash PTB: {}", e);
+                }
+            }
+        }
+    }
+    
+    // Add slash transactions to ranking result
+    ranking_result.slash_transactions = slash_transactions;
 
     Ok(Json(to_signed_response(
         &state.eph_kp,
