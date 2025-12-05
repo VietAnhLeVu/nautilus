@@ -10,7 +10,7 @@
 
 ![image](./flows.png)
 
-**Dapp developer actions**
+**Dappaa developer actions**
 
 1. Create a Nautilus offchain server with a reproducible build. You may or may not start from the provided template.
 2. Publish the server code to a public repository (such as GitHub) to ensure transparency and verifiability.
